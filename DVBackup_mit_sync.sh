@@ -86,7 +86,8 @@ case "$media" in
      echo "Externes Medium ist $device."
      remove="eject $device"
      rdxin=true
-     cat /proc/partitions | grep $device >/dev/null || rdxin=false
+     partition=`echo $device | sed 's/\/dev\///'`
+     cat /proc/partitions | grep $partition >/dev/null || rdxin=false
      ;;
    *)
      echo "ABBRUCH, bitte externes Medium korrekt angeben!"
