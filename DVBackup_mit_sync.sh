@@ -121,13 +121,14 @@ if [ "${CHECK}" != "0" ] ; then
       FEHLER=0
       umount $snap >/dev/null 2>&1 &&sleep 1
       mount | grep $snap && FEHLER=1
+      # Falls umount scheitert, greifen vermutlich noch Prozesse auf das device zu:
       if [ "${FEHLER}" = "1" ] ; then 
-         echo "Fehler beim aushaengen von $snap, fsck Pruefung daher nicht moeglich."
-         fscheck="fsck wurde nicht gestartet, da umount von $snap fehlschlug."
-         echo ""
-         echo "Folgende Prozesse greifen derzeit auf $snap zu:"
+         echo "Folgende Prozesse greifen derzeit auf $snap zu. Kill wird versucht."
          lsof $snap
-         echo ""
+         kill $(lsof -t $snap) >/dev/null 2>&1 || echo "Kill gescheitert."
+         umount $snap >/dev/null 2>&1 &&sleep 1
+         mount | grep $snap && fscheck="fsck wurde nicht gestartet, da umount von $snap fehlschlug."
+         echo $fscheck   
       else
          # Pruefen, ob Dateisystem von $snap sauber ist:
          check=0
@@ -168,6 +169,7 @@ if $mirror ; then
    hier=`pwd`
    echo "Spiegelplatte wird synchronisiert..."
    check=0
+   echo ""
    echo "Externes Script $tool wird aufgerufen."
    cd $toolpfad
    $tool
@@ -206,11 +208,11 @@ echo "Fehlerprotokoll ist $errorlog."
 
 #export DAV_HOME=/home/david
 cd /home/david
-echo "ISAM beenden."
-./iquit 2>>$errorlog
+echo ""
+echo -n "ISAM beenden..."
+./iquit || echo "Fehler beim Beenden des ISAM Dienstes." >>$errorlog
 
 # Snapshot erstellen & Logdatei fuer Fehler anlegen
-echo ""
 echo "Lokaler Snapshot wird auf $snap erstellt."
 CHECK=0
 rsnapshot -c $config -v $interval 2>>$errorlog
@@ -222,12 +224,11 @@ else
    backup_success=false
    echo "rsnapshot mit Fehler(n) beendet." >>$errorlog
 fi
-echo ""
 
-echo "ISAM starten..."
-./isam 2>>$errorlog && echo "OK"
+echo -n "ISAM starten..."
+./isam >/dev/null 2>&1 && echo "OK"
 cd $here
-
+echo ""
 
 # Schritt 3: Externe Sicherung -------------------------------------------------
 
@@ -315,10 +316,16 @@ if [ -r $padmplog ]; then
 fi
 
 if $godown ; then
-   echo "Das System schaltet in 20 Sekunden ab..." && sleep 20
+   echo "+++++++++++++++++++++++++++++++++++++++++"
+   echo " Das System schaltet in 120 Sekunden ab."
+   echo "+++++++++++++++++++++++++++++++++++++++++"
+   sleep 120
    /sbin/shutdown -h now
 elif $reset ; then
-   echo "Das System startet in 120 Sekunden neu..." && sleep 120
+   echo "+++++++++++++++++++++++++++++++++++++++++"
+   echo " Das System startet in 120 Sekunden neu."
+   echo "+++++++++++++++++++++++++++++++++++++++++"
+   sleep 120
    /sbin/shutdown -r now
 fi
 
@@ -365,18 +372,19 @@ lockfile         /var/run/rsnapshot.pid
 one_fs           1
 #
 ## Exclude List ##
-exclude  Recycled/
-exclude  Trash/
-exclude  lost+found/
-exclude  .gvfs/
-exclude  *_uds_*
-exclude  *.SP
-exclude  *.SF
-exclude  /home/install
+exclude          Recycled/
+exclude          Trash/
+exclude          lost+found/
+exclude          /home/install/
+exclude          .gvfs/
+exclude          *_uds_*
+exclude          *.SP
+exclude          *.SF
 #
 ###############################
 ### BACKUP POINTS / SCRIPTS ###
 ###############################
 # LOCALHOST
-backup   /home/      localhost/
-backup   /etc/       localhost/
+backup           /home/           localhost/
+backup           /etc/            localhost/
+backup           /usr/local/etc   localhost/
