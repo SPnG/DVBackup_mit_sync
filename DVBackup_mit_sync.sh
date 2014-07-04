@@ -14,40 +14,39 @@
 # --> Anpassung der /etc/rsnapshot.conf nicht vergessen!
 #     Bitte passendes Beispiel conf Datei beachten (s.u.) 
 #
-# Speedpoint nG GmbH (FW), Version 2.0, Stand: Juni 2014
+# Speedpoint nG GmbH (FW), Version 2.1, Stand: Juli 2014
 
 
 
 
 ### Folgende Werte bitte anpassen: #############################################
 #
-user=david                             # Lokaler Empfaenger der Statusmails
+user=david                              # Lokaler Empfaenger der Statusmails
+# 
+config="/etc/rsnapshot.spng.conf"       # Optional eigene Konfigurationsdatei
 #
-interval=daily                         # [hourly/daily/weekly/monthly]  
-config=/etc/rsnapshot.spng.conf        # Optional eigene Konfigurationsdatei
+snap="/dev/sdc1"                        # Devicebezeichn. der Snapshot Partition
+hddout=true                             # $snap nach dem Snapshot aushaengen?
 #
-snap=/dev/sdc1                         # Devicebezeichn. der Snapshot Partition
-hddout=true                            # nach rsnapshot aushaengen?
+crypt=true                              # Verschluesselung auf dem ext. Medium?
+dvkey=david                             # Passwort fuer Verschluesselung
 #
-crypt=true                             # Verschluesselung auf dem ext. Medium?
-dvkey=david                            # Passwort fuer Verschluesselung
+media=rdx                               # Sicherungsmedium [dds/rdx]
+device="/dev/sdd"                       # Devicebezeichn., falls $media RDX ist
 #
-media=rdx                              # [dds/rdx]
-godown=false                           # Shutdown nach Backup?
-reset=true                             # Reset nach Backup?
+godown=false                            # Server Shutdown nach dem Backup?
+reset=true                              # Server Reset nach dem Backup?
 #
-toolpfad=/install/skripte
-vcheck=false                           # Virensuche in trpword starten?
-vtool=$toolpfad/vcheck.sh              # Pfad zu virencheck.sh
-rkcheck=false                          # Rootkit Suche starten?
-rktool=$toolpfad/rkcheck.sh            # Pfad zu rootkit.sh
+toolpfad="/install/skripte"             # Wo liegen die Zusatzskripte?
+rktool="$toolpfad/rkcheck.sh"           # Testtool auf Rootkits
+tool="$toolpfad/mirror_hdd.sh"          # Tool zur HDD Synchronisation
 #
-mirror=true                            # Sync der Spiegelplatte vor dem Backup
-tool=$toolpfad/mirror_hdd.sh           # Pfad & Name des Sync Scripts
+mirror=true                             # Sync der Spiegelplatte vor dem Backup
+rkcheck=false                           # Rootkit Suche starten?
 #
 #
 # ACHTUNG: Namen der Logdatei im Skript SaveAndHalt.bat des WinPCs abgleichen!
-padmplog=/home/david/trpword/DMPPABackupLog.txt   # Logdatei von SaveAndHalt.bat
+padmplog="/home/david/trpword/DMPPABackupLog.txt" # Logdatei von SaveAndHalt.bat
 #
 #
 ### Ende der Anpassungen #######################################################
@@ -74,20 +73,17 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 # Medium gewaehlt?
+rdxin=true
 case "$media" in
    dds)
-     device=/dev/st0
-     echo "Externes Medium ist $device."
+     device=/dev/st0     
      remove="mt -f $device offline"
-     rdxin=true # Kein Irrtum!
+     # Kassette eingelegt?
+     [ "`mt -f $device status | fgrep 'ONLINE'`" = "" ] && rdxin=false
      ;;
    rdx)
-     device=/dev/sdd
-     echo "Externes Medium ist $device."
      remove="eject $device"
-     rdxin=true
-     partition=`echo $device | sed 's/\/dev\///'`
-     cat /proc/partitions | grep $partition >/dev/null || rdxin=false
+     cat /proc/partitions | grep $device >/dev/null 2>&1 || rdxin=false
      ;;
    *)
      echo "ABBRUCH, bitte externes Medium korrekt angeben!"
@@ -95,6 +91,7 @@ case "$media" in
      exit 1
      ;;
 esac
+echo "Externes Medium ist $device."
 
 # Wurde die config fuer rsnapshot korrekt angegeben?
 if   [ ! -e $config ]; then
@@ -126,7 +123,7 @@ if [ "${CHECK}" != "0" ] ; then
          echo "Folgende Prozesse greifen derzeit auf $snap zu. Kill wird versucht."
          lsof $snap
          kill $(lsof -t $snap) >/dev/null 2>&1 || echo "Kill gescheitert."
-         umount $snap >/dev/null 2>&1 &&sleep 1
+         umount $snap >/dev/null 2>&1 && sleep 1 || umount -l $snap >/dev/null 2>&1
          mount | grep $snap && fscheck="fsck wurde nicht gestartet, da umount von $snap fehlschlug."
          echo $fscheck   
       else
@@ -155,14 +152,11 @@ echo "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
 echo ""
 
 
-# Schritt 0: Rootkit & Virensuche ----------------------------------------------
-if $vcheck ; then
-   $vtool
-fi   
-#
+# Schritt 0: Rootkit Suche ----------------------------------------------
 if $rkcheck ; then
    $rktool
 fi   
+
 
 # Schritt 1: HDD 1 auf Spiegelplatte synchronisieren ---------------------------
 if $mirror ; then
@@ -215,7 +209,7 @@ echo -n "ISAM beenden..."
 # Snapshot erstellen & Logdatei fuer Fehler anlegen
 echo "Lokaler Snapshot wird auf $snap erstellt."
 CHECK=0
-rsnapshot -c $config -v $interval 2>>$errorlog
+rsnapshot -c $config -v daily 2>>$errorlog
 CHECK=`echo $?`
 if [ "${CHECK}" = "0" ] ; then
    backup_success=true
@@ -234,8 +228,7 @@ echo ""
 
 echo "Externe Sicherung beginnt."
 # Medium vorhanden?
-##################################################
-if ! $rdxin ; then
+if [ ! $rdxin ]; then
    rdxtext="Kein Backup Medium eingelegt. "
    echo $rdxtext
    info="FEHLERHAFT"
