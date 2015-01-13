@@ -2,51 +2,52 @@
 
 
 
-# Backup Script fuer taegliche Backups mit rsnapshot & tar
-# rsnapshot mit optionaler Benachrichtigung auf den Desktop eines Users
+# Backup Script fuer regelmaessige Backups mit rsnapshot & tar.
+# Es werden rsnapshots lokal gesichert und danach (optional verschluesselt)
+# auf ein externes Medium gesichert.
+#
 # Zur Benutzung mit cron als root
 #
-# Erfordert rsnapshot, libnotify, perl-Lchown, tar, mt, mcrypt
+# Erfordert rsnapshot, libnotify, perl-Lchown, tar, mt, mcrypt.
 #
 # --> HDD fuer rsnapshot Daten in der /etc/fstab eintragen!
 # --> Anpassung der /etc/rsnapshot.conf nicht vergessen!
 #     Bitte passendes Beispiel conf Datei beachten (s.u.) 
 #
-# Speedpoint nG GmbH (FW), Stand: Januar 2014
+# Speedpoint nG GmbH (FW), Version 2.1, Stand: September 2014
+
 
 
 
 ### Folgende Werte bitte anpassen: #############################################
 #
-user=david                             # Empfaenger fuer Nachrichten & Mails
-message=true                           # Desktop Benachrichtigung senden? 
+user=david                              # Lokaler Empfaenger der Statusmails
+# 
+config="/etc/rsnapshot.spng.conf"       # Optional eigene Konfigurationsdatei
 #
-interval=daily                         # [hourly/daily/weekly/monthly]  
-config=/etc/rsnapshot.spng.conf        # Optional eigene Konfigurationsdatei
+snap="/dev/sdc1"                        # Devicebezeichn. der Snapshot Partition
+hddout=yes                              # $snap nach dem Snapshot aushaengen?
 #
-snap=/dev/sdc1                         # Devicebezeichn. der Snapshot Partition
-hddout=true                            # nach rsnapshot aushaengen?
+crypt=yes                               # Verschluesselung auf dem ext. Medium?
+dvkey=david                             # Passwort fuer Verschluesselung
 #
-crypt=true                             # Verschluesselung auf dem ext. Medium?
-dvkey=david                            # Passwort fuer Verschluesselung
+rdxdev="/dev/sdd"                       # Devicebezeichnung des RDX-Laufwerks
 #
-media=rdx                              # Hier nur 'dds' oder 'rdx' einsetzen!
-godown=false                           # Shutdown nach Backup?
-reset=true                             # Reset nach Backup?
+godown=yes                              # Server Shutdown nach dem Backup?
+reset=no                                # Server Reset nach dem Backup?
 #
-toolpfad=/install/skripte
-vcheck=false                           # Virensuche in trpword starten?
-vtool=$toolpfad/vcheck.sh              # Pfad zu virencheck.sh
+toolpfad="/install/skripte"             # Wo liegen die Zusatzskripte?
+rktool="$toolpfad/rkcheck.sh"           # Testtool auf Rootkits
+vtool="$toolpfad/vcheck.sh"             # clamav Virenscanner inkl. freshclam
+tool="$toolpfad/mirror_hdd.sh"          # Tool zur HDD Synchronisation
 #
-rkcheck=true                           # Rootkit Suche starten?
-rktool=$toolpfad/rkcheck.sh            # Pfad zu rootkit.sh
-#
-mirror=true                            # Sync der Spiegelplatte vor dem Backup
-tool=$toolpfad/mirror_hdd.sh           # Pfad & Name des Sync Scripts
+mirror=yes                              # Sync der Spiegelplatte vor dem Backup
+rkcheck=no                              # Rootkit Suche starten?
+vcheck=yes                              # Virenscanner starten?
 #
 #
 # ACHTUNG: Namen der Logdatei im Skript SaveAndHalt.bat des WinPCs abgleichen!
-padmplog=/home/david/trpword/DMPPABackupLog.txt   # Logdatei von SaveAndHalt.bat
+padmplog="/home/david/trpword/DMPPABackupLog.txt" # Logdatei von SaveAndHalt.bat
 #
 #
 ### Ende der Anpassungen #######################################################
@@ -72,24 +73,12 @@ if [ "$(id -u)" != "0" ]; then
    exit 1
 fi
 
-# Medium gewaehlt?
-case "$media" in
-   dds)
-     device="/dev/st0"
-     echo "Externes Medium ist $device."
-     remove="mt -f $device offline"
-     ;;
-   rdx)
-     device="/dev/sdd"
-     echo "Externes Medium ist $device."
-     remove="eject $device"
-     ;;
-   *)
-     echo "ABBRUCH, bitte externes Medium korrekt angeben!"
-     echo "Externes Backupmedium nicht korrekt angegeben." | mail -s "WARNUNG: Backup nicht korrekt konfiguriert!" $user@localhost
-     exit 1
-     ;;
-esac
+# RDX Medium vorhanden?
+rdxok=no
+rdx=`echo $rdxdev | sed -e 's/\/dev\///g'`
+remove="eject $rdxdev"
+cat /proc/partitions | grep $rdx >/dev/null 2>&1 && rdxok=yes
+echo "$rdxdev wurde als RDX Laufwerk angegeben."
 
 # Wurde die config fuer rsnapshot korrekt angegeben?
 if   [ ! -e $config ]; then
@@ -101,41 +90,48 @@ if [[ `cat $config | grep Speedpoint` = "" ]]; then
      exit 1
 fi
 
+
 # Mountpoint fuer die Snapshots testen:
-if [ "`cat /etc/fstab | grep $snap`" ]; then
-   mount $snap
-   if [ $? = "1" ]; then
-      text="Fehler beim Einhaengen der Sicherungsfestplatte $snap."
+check=0
+cat /etc/fstab | grep $snap >/dev/null
+CHECK=`echo $?`
+if [ "${CHECK}" != "0" ] ; then
+      text="Sicherungsfestplatte $snap nicht in fstab gefunden."
       echo $text
       echo $text | mail -s "WARNUNG: Backup nicht korrekt konfiguriert!" $user@localhost
       exit 1
       echo ""
    else
-      umount $snap && sleep 3
-      # ~~~ neu ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-      # Pruefen, ob Dateisystem von $snap sauber ist:
       echo "Snapshot Medium ist $snap."
-      if [ "`e2fsck -n $snap | grep 'sauber'`" ]; then
-         sauber=true
-         fscheck="Das Dateisystem von $snap ist sauber."
-         echo $fscheck
+      FEHLER=0
+      umount $snap >/dev/null 2>&1 && sleep 1
+      mount | grep $snap && FEHLER=1
+      # Falls umount scheitert, greifen vermutlich noch Prozesse auf das device zu:
+      if [ "${FEHLER}" = "1" ] ; then 
+         echo "Folgende Prozesse greifen derzeit auf $snap zu. Kill wird versucht."
+         lsof $snap
+         kill $(lsof -t $snap) >/dev/null 2>&1 || echo "Kill gescheitert."
+         umount $snap >/dev/null 2>&1 && sleep 1 || umount -l $snap >/dev/null 2>&1
+         mount | grep $snap && fscheck="fsck wurde nicht gestartet, da umount von $snap fehlschlug."
+         echo $fscheck   
       else
-         sauber=false
-         text="WARNUNG: Das Dateisystem von $snap muss repariert werden, bitte umgehend Speedpoint anrufen."
-         echo $text | mail -s "Die Sicherungsfestlatte ist fehlerhaft und muss geprueft werden." $user@localhost
-         echo $text
-         echo ""
-         exit 1
+         # Pruefen, ob Dateisystem von $snap sauber ist:
+         check=0
+         e2fsck -n $snap | grep 'sauber' >/dev/null
+         CHECK=`echo $?`
+         if [ "${CHECK}" = "0" ] ; then
+            sauber=true
+            fscheck="Das Dateisystem von $snap ist sauber."
+            echo $fscheck
+         else
+            text="WARNUNG: Das Dateisystem von $snap muss repariert werden, bitte umgehend Speedpoint anrufen."
+            echo $text | mail -s "Die Sicherungsfestlatte ist offenbar fehlerhaft und muss geprueft werden." $user@localhost
+            echo $text
+            echo ""
+            #exit 1
+         fi
       fi
-      # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-   fi
 fi
-
-# Fuer Display Benachrichtigungen
-ichbins=`whoami`
-export DISPLAY=:0.0
-export XAUTHORITY=$(/usr/bin/find /var/run/gdm -path "*$user*/database") ;
-
 
 echo ""
 echo "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
@@ -144,139 +140,155 @@ echo "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
 echo ""
 
 
-# Schritt 0: Rootkit & Virensuche ----------------------------------------------
-if $vcheck ; then
-   $vtool
-fi   
-#
-if $rkcheck ; then
+# Schritt 0: Rootkit und Virensuche --------------------------------------------
+if [ "$rkcheck" = "yes" ]; then
    $rktool
-fi   
+fi 
+#
+if [ "$vcheck" = "yes" ]; then
+   $vtool
+fi     
+
 
 # Schritt 1: HDD 1 auf Spiegelplatte synchronisieren ---------------------------
-if $mirror ; then
+if [ "$mirror" = "yes" ]; then
    hier=`pwd`
-   if $message ; then
-	  su - $user -c "notify-send 'Spiegelplatte wird aktualisiert...' -i /usr/share/icons/gnome/32x32/actions/go-jump.png --hint=int:transient:1"
-   fi
-
    echo "Spiegelplatte wird synchronisiert..."
+   check=0
+   echo ""
+   echo "Externes Script $tool wird aufgerufen."
    cd $toolpfad
    $tool
-
-   if [ ! $? -eq 0 ]; then
+   CHECK=`echo $?`
+   if [ "${CHECK}" != "0" ] ; then
       echo "WARNUNG: Fehler beim Synchronisieren der Spiegelplatte!"
    fi
    cd $hier
+   echo "Externes Skript beendet."
 else
    echo "Synchronisation der HDDs nicht aktiviert."
 fi   
 
 
 # Schritt 2: Lokalen Snapshot erstellen ----------------------------------------
+echo ""
+echo "Lokalen Snapshot erstellen:"
+jetzt=`date`
 
 # rsnapshot HDD ggf. einhaengen
-mount | grep "on ${volume} type" > /dev/null
-if [ $? -ne 0 ]; then 
-   mount $snap &> /dev/null
+check=0
+mount | grep $snap >/dev/null 2>&1 || mount $snap >/dev/null 2>&1
+CHECK=`echo $?`
+if [ "${CHECK}" != "0" ] ; then 
+   echo "ABBRUCH: Fehler beim Einhaengen von $snap."
+   echo ""
+   exit 1
+else
+   echo "$snap wurde gemountet."
 fi
 
-# Startnachricht an User
-if $message ; then
-   su - $user -c "notify-send 'Starte Backup auf Festplatte...' -i /usr/share/icons/gnome/32x32/actions/go-jump.png --hint=int:transient:1"
-fi
+mountpoint=`cat /etc/fstab | grep $snap | awk {'print $2'}`
 
-here=`pwd`
+errorlog=$mountpoint/Fehler.log
+echo "Fehlerprotokoll ist $errorlog."
+
+#export DAV_HOME=/home/david
 cd /home/david
-./iquit
+echo ""
+echo -n "ISAM beenden..."
+./iquit || echo "Fehler beim Beenden des ISAM Dienstes." >>$errorlog
 
 # Snapshot erstellen & Logdatei fuer Fehler anlegen
-jetzt=`date`
-errorlog="$snap/Fehler.log"
-rsnapshot -c $config -v $interval 2>>$errorlog
-
-if [ $? -eq 0 ]; then
+echo "Lokaler Snapshot wird auf $snap erstellt."
+CHECK=0
+rsnapshot -c $config -v daily 2>>$errorlog
+CHECK=`echo $?`
+if [ "${CHECK}" = "0" ] ; then
    backup_success=true
+   echo "rsnapshot erfolgreich."
 else
    backup_success=false
+   echo "rsnapshot mit Fehler(n) beendet." >>$errorlog
 fi
 
-./isam
+echo -n "ISAM starten..."
+./isam >/dev/null 2>&1 && echo "OK"
 cd $here
-
-# ggf. verschluesselte Kopie von daily.0 anlegen & verschluesseln
-data=$snap/daily.0
-
-if $crypt ; then
-   rm -f $snap/*.tar.nc 2>>/dev/null
-   keyfile=`mktemp /tmp/keyfile.XXXXXXXX`
-   echo $dvkey >$keyfile
-   echo "Verschluesselung vorbereiten..."
-   tar cf $snap/daily.0.tar $snap/daily.0 && echo OK
-   echo "Verschluesseln..."
-   if $message ; then
-      su - $user -c "notify-send 'Verschluesseln... $crypt_message' -i /usr/share/icons/gnome/32x32/emblems/emblem-default.png --hint=int:transient:1"
-   fi
-   mcrypt -f `echo $keyfile` $snap/daily.0.tar 2>>$errorlog
-   if [ $? -eq 0 ]; then
-      crypt_message="Die gesicherten Daten wurden mit dem Passwort $dvkey verschluesselt"
-      echo "Verschluesselung mit Passwort $dvkey erfolgreich."
-      data=$snap/daily.0.tar.nc
-   else
-      crypt_message="ACHTUNG: Bei der Verschluesselung ist ein Fehler aufgetreten, bitte $errorlog beachten!  "
-      echo "WARNUNG: Fehler bei der Verschluesselung, bitte $errorlog beachten!"
-   fi
-   rm -f $snap/daily.0.tar
-   rm -f $keyfile 
-else
-   echo "Verschluesselung deaktiviert"
-   crypt_message="Die gesichterten Daten wurden nicht verschluesselt."
-fi
-
-if $message ; then
-   if  $backup_success ; then
-      # Erfolgsmeldung auf Desktop
-      su - $user -c "notify-send 'Backup erfolgreich. $crypt_message' -i /usr/share/icons/gnome/32x32/emblems/emblem-default.png --hint=int:transient:1"
-   else
-      su - $user -c "notify-send 'WARNUNG: Backup mit Fehlern beendet $crypt_message :-(    Bitte $errorlog beachten!' -i /usr/share/icons/gnome/32x32/status/dialog-error.png"
-   fi
-fi
+echo ""
 
 # Schritt 3: Externe Sicherung -------------------------------------------------
 
-tempfile=`mktemp /tmp/tarbackup.XXXXXXXX`|| exit 1
-echo $crypt_message >>$tempfile
-echo "" >>$tempfile
-
-if $message ; then
-   su - $user -c "notify-send 'Externe Sicherung startet...' -i /usr/share/icons/gnome/32x32/actions/go-jump.png --hint=int:transient:1"
-fi
-
-chmod 0666 $device
-
-tar -cvf $device $data >>$tempfile 2>&1
-if [ $? -eq 0 ]; then
-   info="erfolgreich"
-   echo "Externe Sicherung okay."
+# Medium vorhanden?
+if [ "$rdxok" = "no" ]; then
+   rdxtext="Auf $rdxdev kann nicht gesichert werden (kein Medium?). "
+   echo $rdxtext
+   info="FEHLERHAFT"
 else
-   info="--> FEHLERHAFT <--"
-   echo "WARNUNG: Externe Datensicherung fehlerhaft."
-   cat $tempfile | mail -s "WARNUNG: Externe Datensicherung fehlerhaft!" $user@localhost
+   echo "$rdxdev okay, externe Sicherung wird vorbereitet."
+   # ggf. verschluesselte Kopie von daily.0 anlegen & verschluesseln
+   if [ "$crypt"  = "yes" ]; then
+      rm -f $mountpoint/*.tar.nc 2>/dev/null
+      keyfile=`mktemp /tmp/keyfile.XXXXXXXX`
+      echo $dvkey >$keyfile
+      echo "Verschluesselung vorbereiten..."
+      tar -cf $mountpoint/daily.0.tar $mountpoint/daily.0 --exclude=$mountpoint/daily.0/localhost/home/install --one-file-system 2> >(egrep -v 'socket ignored\|Kann stat nicht' >&2) && echo "OK."
+      echo "Verschluesseln..."
+      CHECK=0
+      mcrypt -f `echo $keyfile` $mountpoint/daily.0.tar 2>>$errorlog || CHECK=1
+      if [ "${CHECK}" = "0" ] ; then
+         crypt_message="Die gesicherten Daten wurden mit dem Passwort '$dvkey' verschluesselt."
+         echo $crypt_message
+         data=$mountpoint/daily.0.tar.nc
+      else
+         crypt_message="ACHTUNG: Bei der Verschluesselung ist ein Fehler aufgetreten, bitte $errorlog beachten!  "
+         echo "WARNUNG: Fehler bei der Verschluesselung, bitte $errorlog beachten!"
+      fi
+      rm -f $mountpoint/daily.0.tar
+      rm -f $keyfile    
+   else
+      echo "mcrypt Verschluesselung deaktiviert."
+      crypt_message="Die gesichterten Daten wurden nicht verschluesselt."
+      data=$mountpoint/daily.0
+   fi
+   # Auf Medium schreiben:
+   tempfile=`mktemp /tmp/tarbackup.XXXXXXXX`
+   echo "Temp. Datei ist $tempfile."
+   echo $crypt_message >>$tempfile
+   echo "" >>$tempfile
+   rdxtext=""
+   chmod 666 $rdxdev
+   CHECK=0
+   echo "Medium $rdxdev wird beschrieben."
+   tar -cvf $rdxdev $data >>$tempfile 2>&1
+   CHECK=`echo $?`
+   if [ "${CHECK}" = "0" ] ; then
+      info="erfolgreich"
+      echo "Externe Sicherung okay."
+      # Medienauswurf
+      echo "Medium $rdxdev wird ausgeworfen."
+      $remove || echo "Auswurf fehlerhaft."
+   else
+      info="FEHLERHAFT"
+      echo "WARNUNG: Externe Datensicherung fehlerhaft."
+      cat $tempfile | mail -s "WARNUNG: $rdxtext Externe Datensicherung fehlerhaft!" $user@localhost
+      rm -f $tempfile && echo "$tempfile geloescht."
+      echo "Kein Medeinauswurf von $rdxdev."
+   fi
 fi
 
-echo "Die Externe Datensicherung von $jetzt wurde $info abgeschlossen. $crypt_message. $fscheck" | mail -s "Externe Datensicherung $info" $user@localhost
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-
-# Medienauswurf
-$remove
-
-rm -f $tempfile
+# Nachricht absetzen:
+echo ""
+mailtext="Die Externe Datensicherung von $jetzt wurde $info abgeschlossen. $crypt_message $fscheck"
+echo $mailtext
+echo $mailtext | mail -s "Externe Datensicherung $info" $user@localhost
+echo ""
 
 # HDD ggf. aushaengen
-if $snapout ; then
-   cd / && sleep 5	
-   umount $snap &> /dev/null
+if [ "$hddout" = "yes" ]; then
+   cd / && sleep 2	
+   umount $snap >/dev/null 2>&1 || echo "Fehler bei umount von $snap."
+else
+   echo "$snap bleibt eingehaengt."
 fi
 
 # Backup Protokoll des/der PA/DMP PCs als Mail versenden, falls vorhanden:
@@ -288,21 +300,28 @@ if [ -r $padmplog ]; then
    fi
 fi
 
-echo ""
-if $message ; then
-   su - $user -c "notify-send 'Externe Sicherung `echo $info` beendet. `echo $ansage`' -i /usr/share/icons/gnome/32x32/actions/go-jump.png --hint=int:transient:1"
-fi
-
-#export DISPLAY=`cat $ichbins/DisplayAusgabe`
-
-if $godown ; then
-   echo "Das System schaltet in 20 Sekunden ab..." && sleep 20
+if [ "$godown" = "yes" ]; then
+   echo "+++++++++++++++++++++++++++++++++++++++++"
+   echo " Das System schaltet in 120 Sekunden ab."
+   echo "+++++++++++++++++++++++++++++++++++++++++"
+   sleep 120
    /sbin/shutdown -h now
-elif $reset ; then
-   echo "Das System startet in 120 Sekunden neu..." sleep 120
+elif [ "$reset" = "yes" ]; then
+   echo "+++++++++++++++++++++++++++++++++++++++++"
+   echo " Das System startet in 120 Sekunden neu."
+   echo "+++++++++++++++++++++++++++++++++++++++++"
+   sleep 120
    /sbin/shutdown -r now
+else
+   /install/skripte/dp_cleaner.spng.sh || info="Fehler bei Ausfuehrung von dp_cleaner.sh."
+   echo ""
+   echo $info
+   echo ""
+   echo $info | mail -s "CGM-Assist Bereinigung gescheitert." $user@localhost
 fi
 
+echo "Skript beendet."
+echo ""
 exit 0
 
 # ------------------------------------------------------------------------------
@@ -344,16 +363,19 @@ lockfile         /var/run/rsnapshot.pid
 one_fs           1
 #
 ## Exclude List ##
-exclude  Recycled/
-exclude  Trash/
-exclude  lost+found/
-exclude  .gvfs/
-exclude  *_uds_*
-exclude  *.SP
+exclude          Recycled/
+exclude          Trash/
+exclude          lost+found/
+exclude          /home/install/
+exclude          .gvfs/
+exclude          *_uds_*
+exclude          *.SP
+exclude          *.SF
 #
 ###############################
 ### BACKUP POINTS / SCRIPTS ###
 ###############################
 # LOCALHOST
-backup   /home/      localhost/
-backup   /etc/       localhost/
+backup           /home/           localhost/
+backup           /etc/            localhost/
+backup           /usr/local/etc   localhost/
